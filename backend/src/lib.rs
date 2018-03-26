@@ -16,9 +16,14 @@ extern crate tungstenite;
 
 #[macro_use]
 mod result;
+mod error;
+pub use error::{Error, Result};
 
 mod config;
 pub use config::Config;
 
 mod acceptor;
 pub use acceptor::Acceptor;
+
+mod connection;
+pub use connection::Connection;

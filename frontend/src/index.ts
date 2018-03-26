@@ -1,11 +1,17 @@
+/* Architecture overview
+ * =====================
+ *
+ * We work this by creating all of our events (from UI and from websockets) and
+ * putting them into a single SPSC queue. We asynchronously fire events into
+ * the queue as necessary, and then listen to new events on the queue and
+ * process them in order in the process function.
+ */
 import { Queue } from "./queue";
 
-const NAME = "name";
-const WAIT = "wait";
-const CANCEL = "cancel";
-type NAME = "name";
-type WAIT = "wait";
-type CANCEL = "cancel";
+// EVENT type definitions - one big union of every event that can happen
+const NAME = "name"; type NAME = "name";
+const WAIT = "wait"; type WAIT = "wait";
+const CANCEL = "cancel"; type CANCEL = "cancel";
 
 type Event =
     | { kind: NAME, value: string }
@@ -13,22 +19,7 @@ type Event =
     | { kind: CANCEL }
 ;
 
-const main = () => {
-    const queue = new Queue<Event>();
-    process(queue);
-
-    const name = document.getElementById("name");
-    name.addEventListener("input", event => queue.push({
-        kind: NAME,
-        value: name.value,
-    }));
-
-    const wait = document.getElementById("wait");
-    wait.addEventListener("click", event => queue.push({ kind: WAIT }));
-    const cancel = document.getElementById("cancel");
-    cancel.addEventListener("click", event => queue.push({ kind: CANCEL }));
-}
-
+// function with the main event loop.
 const process = async (queue: Queue<Event>) => {
     const name = document.getElementById("name");
     const wait = document.getElementById("wait");
@@ -36,6 +27,7 @@ const process = async (queue: Queue<Event>) => {
 
     let waiting = false;
 
+    // main event loop
     while (1) {
         const next = await queue.pop();
         switch (next.kind) {
@@ -59,6 +51,23 @@ const process = async (queue: Queue<Event>) => {
                 break;
         }
     }
+}
+
+// setup, and start the main event loop
+const main = () => {
+    const queue = new Queue<Event>();
+    process(queue);
+
+    const name = document.getElementById("name");
+    name.addEventListener("input", event => queue.push({
+        kind: NAME,
+        value: name.value,
+    }));
+
+    const wait = document.getElementById("wait");
+    wait.addEventListener("click", event => queue.push({ kind: WAIT }));
+    const cancel = document.getElementById("cancel");
+    cancel.addEventListener("click", event => queue.push({ kind: CANCEL }));
 }
 
 document.addEventListener("DOMContentLoaded", main);

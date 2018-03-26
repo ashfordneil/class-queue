@@ -1,0 +1,76 @@
+$handheld: "only screen and (max-width: 719px)";
+$wide-screens: "only screen and (min-width: 720px)";
+
+body {
+    height: 100%;
+    margin: 0;
+
+    display: flex;
+    justify-content: center;
+
+    #container {
+        margin: 1rem;
+        @media #{$wide-screens} {
+            min-width: 640px;
+            width: 60%;
+        }
+
+        display: flex;
+        flex-flow: column;
+        align-items: center;
+    }
+}
+
+#headings {
+    display: flex;
+
+    h1 {
+        @media #{$handheld} {
+            font-size: 2rem;
+        }
+        @media #{$wide-screens} {
+            font-size: 4rem;
+        }
+    }
+}
+
+#inputs {
+    width: 100%;
+
+    display: flex;
+    @media #{$handheld} {
+        flex-wrap: wrap;
+    }
+
+    * {
+        margin: 0.5rem;
+        padding: 0.5rem;
+    }
+
+    @media #{$wide-screens} {
+        input {
+            flex: 1;
+        }
+    }
+    @media #{$handheld} {
+        input {
+            width: 100%;
+        }
+
+        button {
+            flex: 1;
+        }
+    }
+}
+
+#queue {
+    width: 100%;
+    flex: 1;
+
+    margin: 1rem;
+    background-color: rgb(244, 244, 244);
+    border-radius: 0.2rem;
+}
+
+#footer {
+}

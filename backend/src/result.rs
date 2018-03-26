@@ -1,3 +1,4 @@
+#[macro_export]
 macro_rules! unwrap {
     ($result:expr) => {
         match $result {

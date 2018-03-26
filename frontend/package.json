@@ -1,6 +1,6 @@
 {
     "browserslist": "last 1 Firefox versions",
-    "name": "frontend",
+    "name": "class-queue",
     "version": "1.0.0",
     "main": "index.js",
     "license": "MIT",

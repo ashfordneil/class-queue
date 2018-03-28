@@ -3,17 +3,24 @@
 //! All errors boil down to a single error enum that tracks its cause, and forwards its display
 //! implementation with some context.
 //!
-//! As well as this enum, a macro throw has been defined - similar to try! - that logs errors at
+//! As well as this enum, a macro throw! has been defined - similar to try! - that logs errors at
 //! the warn level and then propagates them up.
 
 use std::io;
 use std::result;
+
+use toml::de;
 
 quick_error! {
     #[derive(Debug)]
     pub enum Error {
         Io(err: io::Error) {
             display("IO error: {}", err)
+            cause(err)
+            from()
+        }
+        Config(err: de::Error) {
+            display("Config file error: {}", err)
             cause(err)
             from()
         }

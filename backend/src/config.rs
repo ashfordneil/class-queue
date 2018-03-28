@@ -24,6 +24,7 @@ pub struct Config {
 
     // Socket parameters
     pub port: u16,
+    #[serde(default = "default_1024")] pub events_capacity: usize,
 }
 
 impl Config {
@@ -66,4 +67,9 @@ where
     keys.into_iter()
         .next()
         .ok_or(D::Error::custom("No RSA keys found"))
+}
+
+/// Helper function to return a default value.
+fn default_1024() -> usize {
+    1024
 }

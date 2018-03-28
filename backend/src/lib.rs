@@ -13,8 +13,8 @@ extern crate tungstenite;
 extern crate quick_error;
 
 #[macro_use]
-pub mod error;
+mod error;
 pub use error::{Error, Result};
 
-pub mod config;
+mod config;
 pub use config::Config;

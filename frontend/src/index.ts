@@ -21,9 +21,9 @@ type Event =
 
 // function with the main event loop.
 const process = async (queue: Queue<Event>) => {
-    const name = document.getElementById("name");
-    const wait = document.getElementById("wait");
-    const cancel = document.getElementById("cancel");
+    const name = <HTMLInputElement>document.getElementById("name")!;
+    const wait = <HTMLInputElement>document.getElementById("wait");
+    const cancel = <HTMLInputElement>document.getElementById("cancel");
 
     let waiting = false;
 
@@ -58,15 +58,15 @@ const main = () => {
     const queue = new Queue<Event>();
     process(queue);
 
-    const name = document.getElementById("name");
+    const name = <HTMLInputElement>document.getElementById("name");
     name.addEventListener("input", event => queue.push({
         kind: NAME,
         value: name.value,
     }));
 
-    const wait = document.getElementById("wait");
+    const wait = <HTMLInputElement>document.getElementById("wait");
     wait.addEventListener("click", event => queue.push({ kind: WAIT }));
-    const cancel = document.getElementById("cancel");
+    const cancel = <HTMLInputElement>document.getElementById("cancel");
     cancel.addEventListener("click", event => queue.push({ kind: CANCEL }));
 }
 

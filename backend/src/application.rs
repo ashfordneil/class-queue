@@ -1,26 +1,16 @@
+use config::Config;
+
 use std::collections::VecDeque;
-use std::io::{self, BufRead};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use bcrypt::{self, DEFAULT_COST};
+use bcrypt;
 
-use harsh::{Harsh, HarshBuilder};
-
-use rand::{OsRng, Rng};
-
-use rpassword;
+use harsh::Harsh;
 
 use serde_json;
 
 use websocket::message::OwnedMessage;
-
-pub fn root_dir() -> PathBuf {
-    eprint!("Enter root static file path: ");
-    let stdin = io::stdin();
-    let raw = stdin.lock().lines().next().unwrap().unwrap();
-    PathBuf::from(raw.trim())
-}
 
 /// A single student that is waiting for help.
 #[derive(Debug, Serialize, Clone)]
@@ -86,31 +76,16 @@ pub struct State {
     admins: Mutex<Vec<u64>>,
     /// Largest allocated token + 1 (the next token to be allocated)
     max_token: Mutex<u64>,
+    /// The root directory to serve static files from
+    pub root_dir: PathBuf,
 }
 
 impl State {
     /// Create a new application state - reads the password from STDIN and panics on failure
-    pub fn new() -> Self {
+    pub fn new(cfg: Config) -> Self {
         let queue = Mutex::new(VecDeque::new());
 
-        let password = {
-            let password = rpassword::prompt_password_stderr("enter your password: ").unwrap();
-            let confirm = rpassword::prompt_password_stderr("confirm your password: ").unwrap();
-
-            if password != confirm {
-                panic!("Passwords should match");
-            }
-
-            bcrypt::hash(&password, DEFAULT_COST).unwrap()
-        };
-
-        let hasher = {
-            let mut salt = [0; 64];
-            let mut rng = OsRng::new().unwrap();
-            rng.fill_bytes(&mut salt[..]);
-
-            HarshBuilder::new().salt(&salt[..]).init().unwrap()
-        };
+        let Config { root_dir, bcrypt_password: password, hasher } = cfg;
 
         let admins = Mutex::new(Vec::new());
 
@@ -122,6 +97,7 @@ impl State {
             hasher,
             admins,
             max_token,
+            root_dir,
         }
     }
 

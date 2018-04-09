@@ -10,7 +10,6 @@ extern crate hyper;
 #[macro_use]
 extern crate lazy_static;
 extern crate rand;
-extern crate rpassword;
 extern crate serde;
 #[macro_use]
 extern crate serde_derive;
@@ -18,11 +17,15 @@ extern crate serde_json;
 extern crate tokio_core;
 extern crate tokio_io;
 extern crate tokio;
+extern crate toml;
 extern crate unicase;
 extern crate websocket;
 
 mod application;
 use application::State;
+
+mod config;
+use config::Config;
 
 mod mpmc;
 use mpmc::Mpmc;
@@ -94,8 +97,7 @@ fn http_serialize(res: Response<Vec<u8>>) -> Vec<u8> {
 
 fn main() {
     env_logger::init();
-    let state = State::new();
-    let root = application::root_dir();
+    let state = State::new(Config::new());
 
     info!("Warming up");
     let mut core = Core::new().unwrap();
@@ -116,7 +118,7 @@ fn main() {
                     }
                     Err((stream, req, _, error)) => {
                         if let Some(req) = req {
-                            let response = handle_request(&root, &req);
+                            let response = handle_request(&state.root_dir, &req);
                             let output = http_serialize(response);
                             handle.execute(io::write_all(stream, output).map(dev_null).map_err(dev_null))
                                 .unwrap();

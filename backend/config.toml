@@ -1,3 +1,0 @@
-certificate = "certs/publickey.cer"
-priv_key = "certs/privatekey.pem"
-port = 1443

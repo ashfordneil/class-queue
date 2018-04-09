@@ -43,22 +43,17 @@ pub enum ServerMessage {
     UnAuthorized,
     /// Sent to all parties when the queue changes
     NewQueue(Vec<Student>),
-    /// Sent to a student that is waiting when it is their turn to receive help - filtered out by
-    /// the client not the students
-    NewTurn,
 }
 
 #[derive(Debug, Clone)]
 pub enum InternalMessage {
     NewQueue(Vec<Student>),
-    NewTurn,
 }
 
 impl<'a> From<InternalMessage> for ServerMessage {
     fn from(other: InternalMessage) -> Self {
         match other {
             InternalMessage::NewQueue(data) => ServerMessage::NewQueue(data),
-            InternalMessage::NewTurn => ServerMessage::NewTurn,
         }
     }
 }
@@ -85,7 +80,11 @@ impl State {
     pub fn new(cfg: Config) -> Self {
         let queue = Mutex::new(VecDeque::new());
 
-        let Config { root_dir, bcrypt_password: password, hasher } = cfg;
+        let Config {
+            root_dir,
+            bcrypt_password: password,
+            hasher,
+        } = cfg;
 
         let admins = Mutex::new(Vec::new());
 
@@ -208,7 +207,12 @@ impl State {
                             student.being_seen = true;
                         }
 
-                        (None, Some(InternalMessage::NewTurn))
+                        (
+                            None,
+                            Some(InternalMessage::NewQueue(
+                                queue.iter().cloned().collect::<Vec<_>>(),
+                            )),
+                        )
                     } else {
                         (Some(NOPE.clone()), None)
                     }

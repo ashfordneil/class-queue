@@ -13,17 +13,17 @@ use unicase::UniCase;
 
 use websocket::async::server::IntoWs;
 use websocket::codec::http::HttpServerCodec;
-use websocket::header::{Connection, ConnectionOption, Headers, ProtocolName, Upgrade, WebSocketKey, WebSocketVersion};
+use websocket::header::{Connection, ConnectionOption, Headers, ProtocolName, Upgrade,
+                        WebSocketKey, WebSocketVersion};
 use websocket::server::upgrade::{HyperIntoWsError, Request, WsUpgrade};
 
 pub struct TcpStream(pub net::TcpStream);
 
-impl IntoWs for TcpStream
-{
-	type Stream = net::TcpStream;
-	type Error = (net::TcpStream, Option<Request>, BytesMut, HyperIntoWsError);
+impl IntoWs for TcpStream {
+    type Stream = net::TcpStream;
+    type Error = (net::TcpStream, Option<Request>, BytesMut, HyperIntoWsError);
 
-	fn into_ws(self) -> Box<Future<Item = WsUpgrade<Self::Stream, BytesMut>, Error = Self::Error>> {
+    fn into_ws(self) -> Box<Future<Item = WsUpgrade<Self::Stream, BytesMut>, Error = Self::Error>> {
         let validate = |method, version, headers: &Headers| {
             if format!("{}", method) != "GET" {
                 return Err(HyperIntoWsError::MethodNotGet);
@@ -64,46 +64,46 @@ impl IntoWs for TcpStream
                 false
             }
 
-                match headers.get() {
-                    Some(&Connection(ref connection)) => {
-                        if !check_connection_header(connection) {
-                            return Err(HyperIntoWsError::NoWsConnectionHeader);
-                        }
+            match headers.get() {
+                Some(&Connection(ref connection)) => {
+                    if !check_connection_header(connection) {
+                        return Err(HyperIntoWsError::NoWsConnectionHeader);
                     }
-                    None => return Err(HyperIntoWsError::NoConnectionHeader),
-                };
-
-                Ok(())
+                }
+                None => return Err(HyperIntoWsError::NoConnectionHeader),
             };
 
-		let future = self.0.framed(HttpServerCodec)
-          .into_future()
-          .map_err(|(e, s)| {
-              let FramedParts { inner, readbuf, .. } = s.into_parts();
-              (inner, None, readbuf, e.into())
-          })
-          .and_then(move |(m, s)| {
-              let FramedParts { inner, readbuf, .. } = s.into_parts();
-              if let Some(msg) = m {
-                  match validate(msg.subject.0.clone(), msg.version.clone(), &msg.headers) {
-                      Ok(()) => Ok((msg, inner, readbuf)),
-                      Err(e) => Err((inner, Some(msg), readbuf, e)),
-                  }
-              } else {
-                  let err = HyperIntoWsError::Io(io::Error::new(
-                      ErrorKind::ConnectionReset,
-                  "Connection dropped before handshake could be read"));
-                  Err((inner, None, readbuf, err))
-              }
-          })
-          .map(|(m, stream, buffer)| {
-              WsUpgrade {
-                  headers: Headers::new(),
-                  stream: stream,
-                  request: m,
-                  buffer: buffer,
-              }
-          });
-		Box::new(future)
-	}
+            Ok(())
+        };
+
+        let future = self.0
+            .framed(HttpServerCodec)
+            .into_future()
+            .map_err(|(e, s)| {
+                let FramedParts { inner, readbuf, .. } = s.into_parts();
+                (inner, None, readbuf, e.into())
+            })
+            .and_then(move |(m, s)| {
+                let FramedParts { inner, readbuf, .. } = s.into_parts();
+                if let Some(msg) = m {
+                    match validate(msg.subject.0.clone(), msg.version.clone(), &msg.headers) {
+                        Ok(()) => Ok((msg, inner, readbuf)),
+                        Err(e) => Err((inner, Some(msg), readbuf, e)),
+                    }
+                } else {
+                    let err = HyperIntoWsError::Io(io::Error::new(
+                        ErrorKind::ConnectionReset,
+                        "Connection dropped before handshake could be read",
+                    ));
+                    Err((inner, None, readbuf, err))
+                }
+            })
+            .map(|(m, stream, buffer)| WsUpgrade {
+                headers: Headers::new(),
+                stream: stream,
+                request: m,
+                buffer: buffer,
+            });
+        Box::new(future)
+    }
 }

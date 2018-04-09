@@ -40,7 +40,7 @@ use std::path::{Component, Path, PathBuf};
 use either::Either;
 
 use futures::{Future, IntoFuture, Sink, Stream};
-use futures::future::{self, Executor, Loop};
+use futures::future::{self, Loop};
 
 use hyper::{Method, Response, StatusCode};
 use hyper::header::Allow;
@@ -101,7 +101,6 @@ fn main() {
 
     info!("Warming up");
     let mut core = Core::new().unwrap();
-    let handle = core.handle();
     let server = TcpListener::bind(&"0.0.0.0:8080".parse().unwrap()).unwrap();
     let queue = Mpmc::new();
     info!("Ready to roll");
@@ -110,6 +109,7 @@ fn main() {
         .incoming()
         .map_err(dev_null)
         // accept the websocket connections, send HTTP to the non-websocket connections
+        .inspect(|_| info!("new tcp connection"))
         .and_then(|incomming| TcpStream(incomming).into_ws().then(|incomming| {
             let future: Box<Future<Item = Option<Client<_>>, Error = ()>> =
                 match incomming {
@@ -120,17 +120,17 @@ fn main() {
                         if let Some(req) = req {
                             let response = handle_request(&state.root_dir, &req);
                             let output = http_serialize(response);
-                            handle.execute(io::write_all(stream, output).map(dev_null).map_err(dev_null))
-                                .unwrap();
+                            Box::new(io::write_all(stream, output).map(|_| None).map_err(dev_null))
                         } else {
                             warn!("HTTP / Websocket Error: {}", error);
+                            Box::new(future::ok(None))
                         }
-                        Box::new(future::ok(None))
                     }
                 };
             future
         }))
         .filter_map(|client| client)
+        .inspect(|_| info!("new websocket connection"))
         // filter out all non-text messages
         .for_each(|client| {
             let (sink, client_stream) = client.split();
@@ -145,6 +145,7 @@ fn main() {
                 .join(stream.into_future().map_err(dev_null))
                 .map(|(sink, (message, stream))| (sink, stream, message))
                 .and_then(|res| future::loop_fn(res, |(mut sink, stream, message)| {
+                    trace!("Event loop iteration with message {:?}", message);
                     // first, look at the message that we just got
                     let do_continue = (|| {
                         match message {

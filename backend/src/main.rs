@@ -28,7 +28,7 @@ mod config;
 use config::Config;
 
 mod mpmc;
-use mpmc::Mpmc;
+use mpmc::{Mpmc, MpmcStream};
 
 mod patch;
 use patch::TcpStream;
@@ -54,6 +54,7 @@ use tokio_core::reactor::Core;
 use websocket::async::server::IntoWs;
 use websocket::client::async::Client;
 use websocket::message::OwnedMessage;
+use websocket::result::WebSocketError;
 use websocket::server::upgrade::Request;
 
 fn handle_request(root: &Path, req: &Request) -> Response<Vec<u8>> {
@@ -137,6 +138,127 @@ fn handle_http<'a>(
     })
 }
 
+fn handle_client<'a>(
+    client: Client<tokio::net::TcpStream>,
+    publish: &'a Mpmc<application::InternalMessage>,
+    subscribe: MpmcStream<'a, application::InternalMessage>,
+    state: &'a State,
+) -> impl 'a + Future<Item = (), Error = ()> {
+    let (sink, client_stream) = client.split();
+
+    let client_stream = client_stream.map(Either::Left).map_err(|err| {
+        warn!("Reading from websocket {}", err);
+    });
+    let queue_stream = subscribe.map(Either::Right).map_err(|err| {
+        warn!("Reading from mpmc {:?}", err);
+    });
+    let stream = client_stream.select(queue_stream).into_future();
+
+    let first_message = state.connect();
+
+    sink.send(first_message)
+        .map_err(|err| {
+            warn!("Sending to websocket {}", err);
+        })
+        .join(stream.into_future().map_err(|_| {
+            warn!("Reading from aggregate queue");
+        }))
+        .map(|(sink, (message, stream))| (sink, stream, message))
+        .and_then(move |res| {
+            future::loop_fn(res, move |(sink, stream, message)| {
+                client_loop(sink, publish, stream, message, state)
+            })
+        })
+}
+
+fn client_loop<'a, I, O>(
+    mut sink: O,
+    publish: &'a Mpmc<application::InternalMessage>,
+    stream: I,
+    message: Option<Either<OwnedMessage, application::InternalMessage>>,
+    state: &'a State,
+) -> impl 'a
+         + Future<
+    Item = Loop<
+        (),
+        (
+            O,
+            I,
+            Option<Either<OwnedMessage, application::InternalMessage>>,
+        ),
+    >,
+    Error = (),
+>
+where
+    I: 'a
+        + Stream<Item = Either<OwnedMessage, application::InternalMessage>, Error = ()>,
+    O: 'a + Sink<SinkItem = OwnedMessage, SinkError = WebSocketError>,
+{
+    let do_continue = (|| match message {
+        Some(Either::Left(ws_msg)) => {
+            let inner = match ws_msg {
+                OwnedMessage::Text(ref text) => serde_json::from_str(text).map_err(|err| {
+                    warn!("Deserializing client json {}", err);
+                })?,
+                OwnedMessage::Binary(ref bytes) => serde_json::from_slice(bytes).map_err(|err| {
+                    warn!("Deserializing client json {}", err);
+                })?,
+                OwnedMessage::Ping(data) => {
+                    sink.start_send(OwnedMessage::Pong(data)).map_err(|err| {
+                        warn!("Writing pong to websocket {}", err);
+                    })?;
+                    return Ok(());
+                }
+                OwnedMessage::Pong(_) => return Ok(()),
+                OwnedMessage::Close(_) => {
+                    sink.close().map_err(|err| {
+                        warn!("Closing websocket {}", err);
+                    })?;
+                    info!("Closing websocket");
+                    return Err(());
+                }
+            };
+
+            let (reply, internal) = state.from_client(inner);
+            if let Some(reply) = reply {
+                sink.start_send(reply).map_err(|err| {
+                    warn!("Sending to websocket {}", err);
+                })?;
+            }
+
+            if let Some(internal) = internal {
+                publish.send(internal).unwrap();
+            }
+
+            Ok(())
+        }
+        Some(Either::Right(queue_msg)) => {
+            let msg: application::ServerMessage = queue_msg.into();
+            let output = OwnedMessage::Text(serde_json::to_string(&msg).unwrap());
+            sink.start_send(output).map_err(|err| {
+                warn!("Sending to websocket {}", err);
+            })?;
+            Ok(())
+        }
+        None => return Err(()),
+    })().is_ok();
+
+    sink.flush()
+        .map_err(|err| {
+            warn!("Flushing websocket {}", err);
+        })
+        .join(stream.into_future().map_err(|_| {
+            warn!("Reading from aggregate queu");
+        }))
+        .map(move |(sink, (message, stream))| {
+            if do_continue {
+                Loop::Continue((sink, stream, message))
+            } else {
+                Loop::Break(())
+            }
+        })
+}
+
 fn main() {
     env_logger::init();
     let state = State::new(Config::new());
@@ -158,93 +280,7 @@ fn main() {
         .filter_map(|client| client)
         .inspect(|_| info!("new websocket connection"))
         // filter out all non-text messages
-        .for_each(|client| {
-            let (sink, client_stream) = client.split();
-
-            let client_stream = client_stream.map(Either::Left).map_err(|err| {
-                warn!("Reading from websocket {}", err);
-            });
-            let queue_stream = queue.stream().unwrap().map(Either::Right).map_err(|err| {
-                warn!("Reading from mpmc {:?}", err);
-            });
-            let stream = client_stream.select(queue_stream).into_future();
-
-            let first_message = state.connect();
-
-            sink.send(first_message).map_err(|err| {
-                warn!("Sending to websocket {}", err);
-            })
-                .join(stream.into_future().map_err(|_| {
-                    warn!("Reading from aggregate queue");
-                }))
-                .map(|(sink, (message, stream))| (sink, stream, message))
-                .and_then(|res| future::loop_fn(res, |(mut sink, stream, message)| {
-                    trace!("Event loop iteration with message {:?}", message);
-                    // first, look at the message that we just got
-                    let do_continue = (|| {
-                        match message {
-                            Some(Either::Left(ws_msg)) => {
-                                let inner = match ws_msg {
-                                    OwnedMessage::Text(ref text) => serde_json::from_str(text).map_err(|err| {
-                                        warn!("Deserializing client json {}", err);
-                                    })?,
-                                    OwnedMessage::Binary(ref bytes) => serde_json::from_slice(bytes).map_err(|err| {
-                                        warn!("Deserializing client json {}", err);
-                                    })?,
-                                    OwnedMessage::Ping(data) => {
-                                        sink.start_send(OwnedMessage::Pong(data)).map_err(|err| {
-                                            warn!("Writing pong to websocket {}", err);
-                                        })?;
-                                        return Ok(());
-                                    }
-                                    OwnedMessage::Pong(_) => return Ok(()),
-                                    OwnedMessage::Close(_) => {
-                                        sink.close().map_err(|err| {
-                                            warn!("Closing websocket {}", err);
-                                        })?;
-                                        info!("Closing websocket");
-                                        return Err(());
-                                    }
-                                };
-
-                                let (reply, internal) = state.from_client(inner);
-                                if let Some(reply) = reply {
-                                    sink.start_send(reply).map_err(|err| {
-                                        warn!("Sending to websocket {}", err);
-                                    })?;
-                                }
-
-                                if let Some(internal) = internal {
-                                    queue.send(internal).unwrap();
-                                }
-
-                                Ok(())
-                            },
-                            Some(Either::Right(queue_msg)) => {
-                                let msg: application::ServerMessage = queue_msg.into();
-                                let output = OwnedMessage::Text(serde_json::to_string(&msg).unwrap());
-                                sink.start_send(output).map_err(|err| {
-                                    warn!("Sending to websocket {}", err);
-                                })?;
-                                Ok(())
-                            }
-                            None => return Err(()),
-                        }
-                    })().is_ok();
-
-                    sink.flush().map_err(|err| {
-                        warn!("Flushing websocket {}", err);
-                    })
-                        .join(stream.into_future().map_err(|_| {
-                            warn!("Reading from aggregate queu");
-                        }))
-                        .map(move |(sink, (message, stream))| if do_continue {
-                            Loop::Continue((sink, stream, message))
-                        } else {
-                            Loop::Break(())
-                        })
-                }))
-        });
+        .for_each(|client| handle_client(client, &queue, queue.stream().unwrap(), &state));
 
     core.run(future).unwrap()
 }

@@ -14,9 +14,9 @@ extern crate serde;
 #[macro_use]
 extern crate serde_derive;
 extern crate serde_json;
+extern crate tokio;
 extern crate tokio_core;
 extern crate tokio_io;
-extern crate tokio;
 extern crate toml;
 extern crate unicase;
 extern crate websocket;
@@ -39,11 +39,11 @@ use std::path::{Component, Path, PathBuf};
 
 use either::Either;
 
-use futures::{Future, IntoFuture, Sink, Stream};
 use futures::future::{self, Loop};
+use futures::{Future, IntoFuture, Sink, Stream};
 
-use hyper::{Method, Response, StatusCode};
 use hyper::header::Allow;
+use hyper::{Method, Response, StatusCode};
 
 use tokio::net::TcpListener;
 
@@ -52,23 +52,27 @@ use tokio_io::io;
 use tokio_core::reactor::Core;
 
 use websocket::async::server::IntoWs;
-use websocket::message::OwnedMessage;
 use websocket::client::async::Client;
+use websocket::message::OwnedMessage;
 use websocket::server::upgrade::Request;
-
-fn dev_null<T>(_: T) {}
 
 fn handle_request(root: &Path, req: &Request) -> Response<Vec<u8>> {
     let (ref method, ref request) = req.subject;
     if method.to_string() == "GET" {
         let request = request.to_string();
-        let request = if request == "/" { "index.html".into() } else { request };
-        let path = root.components().chain(Path::new(&request)
-            .components()
-            .filter(|component| match component {
-                &Component::Normal(_) => true,
-                _ => false,
-            })
+        let request = if request == "/" {
+            "index.html".into()
+        } else {
+            request
+        };
+        let path = root.components()
+            .chain(
+                Path::new(&request)
+                    .components()
+                    .filter(|component| match component {
+                        &Component::Normal(_) => true,
+                        _ => false,
+                    }),
             )
             .collect::<PathBuf>();
 
@@ -95,6 +99,44 @@ fn http_serialize(res: Response<Vec<u8>>) -> Vec<u8> {
     output
 }
 
+fn handle_http<'a>(
+    incomming: tokio::net::TcpStream,
+    state: &'a State,
+) -> impl 'a + Future<Item = Option<Client<tokio::net::TcpStream>>, Error = ()> {
+    TcpStream(incomming).into_ws().then(move |incomming| {
+        let future: Box<Future<Item = Option<Client<_>>, Error = ()>> = match incomming {
+            Ok(upgrade) => Box::new(
+                upgrade
+                    .accept()
+                    .map(|(client, _headers)| Some(client))
+                    .map_err(|err| {
+                        warn!("Websocket upgrade {}", err);
+                    }),
+            ),
+            Err((stream, req, _, error)) => {
+                if let Some(req) = req {
+                    let response = handle_request(&state.root_dir, &req);
+                    let output = http_serialize(response);
+                    Box::new(
+                        io::write_all(stream, output)
+                            .map(|_| {
+                                info!("Finished writing http response");
+                                None
+                            })
+                            .map_err(|err| {
+                                warn!("Writing http response {}", err);
+                            }),
+                    )
+                } else {
+                    warn!("HTTP / Websocket Error: {}", error);
+                    Box::new(future::ok(None))
+                }
+            }
+        };
+        future
+    })
+}
+
 fn main() {
     env_logger::init();
     let state = State::new(Config::new());
@@ -107,42 +149,34 @@ fn main() {
 
     let future = server
         .incoming()
-        .map_err(dev_null)
+        .map_err(|err| {
+            warn!("Accepting connection: {}", err);
+        })
         // accept the websocket connections, send HTTP to the non-websocket connections
         .inspect(|_| info!("new tcp connection"))
-        .and_then(|incomming| TcpStream(incomming).into_ws().then(|incomming| {
-            let future: Box<Future<Item = Option<Client<_>>, Error = ()>> =
-                match incomming {
-                    Ok(upgrade) => {
-                        Box::new(upgrade.accept().map(|(client, _headers)| Some(client)).map_err(dev_null))
-                    }
-                    Err((stream, req, _, error)) => {
-                        if let Some(req) = req {
-                            let response = handle_request(&state.root_dir, &req);
-                            let output = http_serialize(response);
-                            Box::new(io::write_all(stream, output).map(|_| None).map_err(dev_null))
-                        } else {
-                            warn!("HTTP / Websocket Error: {}", error);
-                            Box::new(future::ok(None))
-                        }
-                    }
-                };
-            future
-        }))
+        .and_then(|incomming| handle_http(incomming, &state))
         .filter_map(|client| client)
         .inspect(|_| info!("new websocket connection"))
         // filter out all non-text messages
         .for_each(|client| {
             let (sink, client_stream) = client.split();
 
-            let client_stream = client_stream.map(Either::Left).map_err(dev_null);
-            let queue_stream = queue.stream().unwrap().map(Either::Right).map_err(dev_null);
+            let client_stream = client_stream.map(Either::Left).map_err(|err| {
+                warn!("Reading from websocket {}", err);
+            });
+            let queue_stream = queue.stream().unwrap().map(Either::Right).map_err(|err| {
+                warn!("Reading from mpmc {:?}", err);
+            });
             let stream = client_stream.select(queue_stream).into_future();
 
             let first_message = state.connect();
 
-            sink.send(first_message).map_err(dev_null)
-                .join(stream.into_future().map_err(dev_null))
+            sink.send(first_message).map_err(|err| {
+                warn!("Sending to websocket {}", err);
+            })
+                .join(stream.into_future().map_err(|_| {
+                    warn!("Reading from aggregate queue");
+                }))
                 .map(|(sink, (message, stream))| (sink, stream, message))
                 .and_then(|res| future::loop_fn(res, |(mut sink, stream, message)| {
                     trace!("Event loop iteration with message {:?}", message);
@@ -151,22 +185,33 @@ fn main() {
                         match message {
                             Some(Either::Left(ws_msg)) => {
                                 let inner = match ws_msg {
-                                    OwnedMessage::Text(ref text) => serde_json::from_str(text).map_err(dev_null)?,
-                                    OwnedMessage::Binary(ref bytes) => serde_json::from_slice(bytes).map_err(dev_null)?,
+                                    OwnedMessage::Text(ref text) => serde_json::from_str(text).map_err(|err| {
+                                        warn!("Deserializing client json {}", err);
+                                    })?,
+                                    OwnedMessage::Binary(ref bytes) => serde_json::from_slice(bytes).map_err(|err| {
+                                        warn!("Deserializing client json {}", err);
+                                    })?,
                                     OwnedMessage::Ping(data) => {
-                                        sink.start_send(OwnedMessage::Pong(data)).map_err(dev_null)?;
+                                        sink.start_send(OwnedMessage::Pong(data)).map_err(|err| {
+                                            warn!("Writing pong to websocket {}", err);
+                                        })?;
                                         return Ok(());
                                     }
                                     OwnedMessage::Pong(_) => return Ok(()),
                                     OwnedMessage::Close(_) => {
-                                        sink.close().map_err(dev_null)?;
+                                        sink.close().map_err(|err| {
+                                            warn!("Closing websocket {}", err);
+                                        })?;
+                                        info!("Closing websocket");
                                         return Err(());
                                     }
                                 };
 
                                 let (reply, internal) = state.from_client(inner);
                                 if let Some(reply) = reply {
-                                    sink.start_send(reply).map_err(dev_null)?;
+                                    sink.start_send(reply).map_err(|err| {
+                                        warn!("Sending to websocket {}", err);
+                                    })?;
                                 }
 
                                 if let Some(internal) = internal {
@@ -178,15 +223,21 @@ fn main() {
                             Some(Either::Right(queue_msg)) => {
                                 let msg: application::ServerMessage = queue_msg.into();
                                 let output = OwnedMessage::Text(serde_json::to_string(&msg).unwrap());
-                                sink.start_send(output).map_err(dev_null)?;
+                                sink.start_send(output).map_err(|err| {
+                                    warn!("Sending to websocket {}", err);
+                                })?;
                                 Ok(())
                             }
                             None => return Err(()),
                         }
                     })().is_ok();
 
-                    sink.flush().map_err(dev_null)
-                        .join(stream.into_future().map_err(dev_null))
+                    sink.flush().map_err(|err| {
+                        warn!("Flushing websocket {}", err);
+                    })
+                        .join(stream.into_future().map_err(|_| {
+                            warn!("Reading from aggregate queu");
+                        }))
                         .map(move |(sink, (message, stream))| if do_continue {
                             Loop::Continue((sink, stream, message))
                         } else {
